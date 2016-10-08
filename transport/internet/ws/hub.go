@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"crypto/tls"
 	"errors"
 	"net"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"v2ray.com/core/common/log"
 	v2net "v2ray.com/core/common/net"
 	"v2ray.com/core/transport/internet"
+	v2tls "v2ray.com/core/transport/internet/tls"
 )
 
 var (
@@ -28,23 +30,38 @@ type WSListener struct {
 	acccepting    bool
 	awaitingConns chan *ConnectionWithError
 	listener      *StoppableListener
+	tlsConfig     *tls.Config
+	config        *Config
 }
 
-func ListenWS(address v2net.Address, port v2net.Port) (internet.Listener, error) {
+func ListenWS(address v2net.Address, port v2net.Port, options internet.ListenOptions) (internet.Listener, error) {
+	networkSettings, err := options.Stream.GetEffectiveNetworkSettings()
+	if err != nil {
+		return nil, err
+	}
+	wsSettings := networkSettings.(*Config)
 
 	l := &WSListener{
 		acccepting:    true,
 		awaitingConns: make(chan *ConnectionWithError, 32),
+		config:        wsSettings,
+	}
+	if options.Stream != nil && options.Stream.SecurityType == internet.SecurityType_TLS {
+		securitySettings, err := options.Stream.GetEffectiveSecuritySettings()
+		if err != nil {
+			log.Error("WebSocket: Failed to create apply TLS config: ", err)
+			return nil, err
+		}
+		l.tlsConfig = securitySettings.(*v2tls.Config).GetTLSConfig()
 	}
 
-	err := l.listenws(address, port)
+	err = l.listenws(address, port)
 
 	return l, err
 }
 
 func (wsl *WSListener) listenws(address v2net.Address, port v2net.Port) error {
-
-	http.HandleFunc("/"+effectiveConfig.Path, func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/"+wsl.config.Path, func(w http.ResponseWriter, r *http.Request) {
 		con, err := wsl.converttovws(w, r)
 		if err != nil {
 			log.Warning("WebSocket|Listener: Failed to convert connection: ", err)
@@ -77,10 +94,10 @@ func (wsl *WSListener) listenws(address v2net.Address, port v2net.Port) error {
 		return http.Serve(wsl.listener, nil)
 	}
 
-	if effectiveConfig.Pto == "wss" {
+	if wsl.tlsConfig != nil {
 		listenerfunc = func() error {
 			var err error
-			wsl.listener, err = getstopableTLSlistener(effectiveConfig.Cert, effectiveConfig.PrivKey, address.String()+":"+strconv.Itoa(int(port.Value())))
+			wsl.listener, err = getstopableTLSlistener(wsl.tlsConfig, address.String()+":"+strconv.Itoa(int(port.Value())))
 			if err != nil {
 				return err
 			}
@@ -135,7 +152,7 @@ func (this *WSListener) Accept() (internet.Connection, error) {
 			if connErr.err != nil {
 				return nil, connErr.err
 			}
-			return NewConnection("", connErr.conn.(*wsconn), this), nil
+			return NewConnection("", connErr.conn.(*wsconn), this, this.config), nil
 		case <-time.After(time.Second * 2):
 		}
 	}

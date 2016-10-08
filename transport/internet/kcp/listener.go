@@ -1,6 +1,7 @@
 package kcp
 
 import (
+	"crypto/tls"
 	"net"
 	"sync"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"v2ray.com/core/common/serial"
 	"v2ray.com/core/proxy"
 	"v2ray.com/core/transport/internet"
+	v2tls "v2ray.com/core/transport/internet/tls"
 	"v2ray.com/core/transport/internet/udp"
 )
 
@@ -22,10 +24,19 @@ type Listener struct {
 	sessions      map[string]*Connection
 	awaitingConns chan *Connection
 	hub           *udp.UDPHub
+	tlsConfig     *tls.Config
+	config        *Config
 }
 
-func NewListener(address v2net.Address, port v2net.Port) (*Listener, error) {
-	auth, err := effectiveConfig.GetAuthenticator()
+func NewListener(address v2net.Address, port v2net.Port, options internet.ListenOptions) (*Listener, error) {
+	networkSettings, err := options.Stream.GetEffectiveNetworkSettings()
+	if err != nil {
+		log.Error("KCP|Listener: Failed to get KCP settings: ", err)
+		return nil, err
+	}
+	kcpSettings := networkSettings.(*Config)
+
+	auth, err := kcpSettings.GetAuthenticator()
 	if err != nil {
 		return nil, err
 	}
@@ -34,6 +45,15 @@ func NewListener(address v2net.Address, port v2net.Port) (*Listener, error) {
 		sessions:      make(map[string]*Connection),
 		awaitingConns: make(chan *Connection, 64),
 		running:       true,
+		config:        kcpSettings,
+	}
+	if options.Stream != nil && options.Stream.SecurityType == internet.SecurityType_TLS {
+		securitySettings, err := options.Stream.GetEffectiveSecuritySettings()
+		if err != nil {
+			log.Error("KCP|Listener: Failed to apply TLS config: ", err)
+			return nil, err
+		}
+		l.tlsConfig = securitySettings.(*v2tls.Config).GetTLSConfig()
 	}
 	hub, err := udp.ListenUDP(address, port, udp.ListenOption{Callback: l.OnReceive})
 	if err != nil {
@@ -83,11 +103,11 @@ func (this *Listener) OnReceive(payload *alloc.Buffer, session *proxy.SessionInf
 			IP:   src.Address.IP(),
 			Port: int(src.Port),
 		}
-		auth, err := effectiveConfig.GetAuthenticator()
+		auth, err := this.config.GetAuthenticator()
 		if err != nil {
 			log.Error("KCP|Listener: Failed to create authenticator: ", err)
 		}
-		conn = NewConnection(conv, writer, this.Addr().(*net.UDPAddr), srcAddr, auth)
+		conn = NewConnection(conv, writer, this.Addr().(*net.UDPAddr), srcAddr, auth, this.config)
 		select {
 		case this.awaitingConns <- conn:
 		case <-time.After(time.Second * 5):
@@ -120,6 +140,10 @@ func (this *Listener) Accept() (internet.Connection, error) {
 		}
 		select {
 		case conn := <-this.awaitingConns:
+			if this.tlsConfig != nil {
+				tlsConn := tls.Server(conn, this.tlsConfig)
+				return v2tls.NewConnection(tlsConn), nil
+			}
 			return conn, nil
 		case <-time.After(time.Second):
 
@@ -173,8 +197,8 @@ func (this *Writer) Close() error {
 	return nil
 }
 
-func ListenKCP(address v2net.Address, port v2net.Port) (internet.Listener, error) {
-	return NewListener(address, port)
+func ListenKCP(address v2net.Address, port v2net.Port, options internet.ListenOptions) (internet.Listener, error) {
+	return NewListener(address, port, options)
 }
 
 func init() {

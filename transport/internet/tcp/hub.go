@@ -1,13 +1,16 @@
 package tcp
 
 import (
+	"crypto/tls"
 	"errors"
 	"net"
 	"sync"
 	"time"
 
+	"v2ray.com/core/common/log"
 	v2net "v2ray.com/core/common/net"
 	"v2ray.com/core/transport/internet"
+	v2tls "v2ray.com/core/transport/internet/tls"
 )
 
 var (
@@ -24,9 +27,11 @@ type TCPListener struct {
 	acccepting    bool
 	listener      *net.TCPListener
 	awaitingConns chan *ConnectionWithError
+	tlsConfig     *tls.Config
+	config        *Config
 }
 
-func ListenTCP(address v2net.Address, port v2net.Port) (internet.Listener, error) {
+func ListenTCP(address v2net.Address, port v2net.Port, options internet.ListenOptions) (internet.Listener, error) {
 	listener, err := net.ListenTCP("tcp", &net.TCPAddr{
 		IP:   address.IP(),
 		Port: int(port),
@@ -34,10 +39,25 @@ func ListenTCP(address v2net.Address, port v2net.Port) (internet.Listener, error
 	if err != nil {
 		return nil, err
 	}
+	networkSettings, err := options.Stream.GetEffectiveNetworkSettings()
+	if err != nil {
+		return nil, err
+	}
+	tcpSettings := networkSettings.(*Config)
+
 	l := &TCPListener{
 		acccepting:    true,
 		listener:      listener,
 		awaitingConns: make(chan *ConnectionWithError, 32),
+		config:        tcpSettings,
+	}
+	if options.Stream != nil && options.Stream.SecurityType == internet.SecurityType_TLS {
+		securitySettings, err := options.Stream.GetEffectiveSecuritySettings()
+		if err != nil {
+			log.Error("TCP: Failed to apply TLS config: ", err)
+			return nil, err
+		}
+		l.tlsConfig = securitySettings.(*v2tls.Config).GetTLSConfig()
 	}
 	go l.KeepAccepting()
 	return l, nil
@@ -53,7 +73,11 @@ func (this *TCPListener) Accept() (internet.Connection, error) {
 			if connErr.err != nil {
 				return nil, connErr.err
 			}
-			return NewConnection("", connErr.conn, this), nil
+			conn := connErr.conn
+			if this.tlsConfig != nil {
+				conn = tls.Server(conn, this.tlsConfig)
+			}
+			return NewConnection("", conn, this, this.config), nil
 		case <-time.After(time.Second * 2):
 		}
 	}
@@ -139,7 +163,7 @@ func (this *RawTCPListener) Close() error {
 	return nil
 }
 
-func ListenRawTCP(address v2net.Address, port v2net.Port) (internet.Listener, error) {
+func ListenRawTCP(address v2net.Address, port v2net.Port, options internet.ListenOptions) (internet.Listener, error) {
 	listener, err := net.ListenTCP("tcp", &net.TCPAddr{
 		IP:   address.IP(),
 		Port: int(port),
@@ -147,6 +171,7 @@ func ListenRawTCP(address v2net.Address, port v2net.Port) (internet.Listener, er
 	if err != nil {
 		return nil, err
 	}
+	// TODO: handle listen options
 	return &RawTCPListener{
 		accepting: true,
 		listener:  listener,

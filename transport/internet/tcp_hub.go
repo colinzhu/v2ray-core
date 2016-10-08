@@ -1,14 +1,12 @@
 package internet
 
 import (
-	"crypto/tls"
 	"errors"
 	"net"
 	"sync"
 
 	"v2ray.com/core/common/log"
 	v2net "v2ray.com/core/common/net"
-	v2tls "v2ray.com/core/transport/internet/tls"
 )
 
 var (
@@ -20,7 +18,11 @@ var (
 	WSListenFunc     ListenFunc
 )
 
-type ListenFunc func(address v2net.Address, port v2net.Port) (Listener, error)
+type ListenFunc func(address v2net.Address, port v2net.Port, options ListenOptions) (Listener, error)
+type ListenOptions struct {
+	Stream *StreamConfig
+}
+
 type Listener interface {
 	Accept() (Connection, error)
 	Close() error
@@ -32,23 +34,25 @@ type TCPHub struct {
 	listener     Listener
 	connCallback ConnectionHandler
 	accepting    bool
-	tlsConfig    *tls.Config
 }
 
-func ListenTCP(address v2net.Address, port v2net.Port, callback ConnectionHandler, settings *StreamSettings) (*TCPHub, error) {
+func ListenTCP(address v2net.Address, port v2net.Port, callback ConnectionHandler, settings *StreamConfig) (*TCPHub, error) {
 	var listener Listener
 	var err error
-	switch {
-	case settings.IsCapableOf(StreamConnectionTypeTCP):
-		listener, err = TCPListenFunc(address, port)
-	case settings.IsCapableOf(StreamConnectionTypeKCP):
-		listener, err = KCPListenFunc(address, port)
-	case settings.IsCapableOf(StreamConnectionTypeWebSocket):
-		listener, err = WSListenFunc(address, port)
-	case settings.IsCapableOf(StreamConnectionTypeRawTCP):
-		listener, err = RawTCPListenFunc(address, port)
+	options := ListenOptions{
+		Stream: settings,
+	}
+	switch settings.Network {
+	case v2net.Network_TCP:
+		listener, err = TCPListenFunc(address, port, options)
+	case v2net.Network_KCP:
+		listener, err = KCPListenFunc(address, port, options)
+	case v2net.Network_WebSocket:
+		listener, err = WSListenFunc(address, port, options)
+	case v2net.Network_RawTCP:
+		listener, err = RawTCPListenFunc(address, port, options)
 	default:
-		log.Error("Internet|Listener: Unknown stream type: ", settings.Type)
+		log.Error("Internet|Listener: Unknown stream type: ", settings.Network)
 		err = ErrUnsupportedStreamType
 	}
 
@@ -57,15 +61,9 @@ func ListenTCP(address v2net.Address, port v2net.Port, callback ConnectionHandle
 		return nil, err
 	}
 
-	var tlsConfig *tls.Config
-	if settings.Security == StreamSecurityTypeTLS {
-		tlsConfig = settings.TLSSettings.GetTLSConfig()
-	}
-
 	hub := &TCPHub{
 		listener:     listener,
 		connCallback: callback,
-		tlsConfig:    tlsConfig,
 	}
 
 	go hub.start()
@@ -87,10 +85,6 @@ func (this *TCPHub) start() {
 				log.Warning("Internet|Listener: Failed to accept new TCP connection: ", err)
 			}
 			continue
-		}
-		if this.tlsConfig != nil {
-			tlsConn := tls.Server(conn, this.tlsConfig)
-			conn = v2tls.NewConnection(tlsConn)
 		}
 		go this.connCallback(conn)
 	}

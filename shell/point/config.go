@@ -1,6 +1,8 @@
 package point
 
 import (
+	"io"
+
 	"v2ray.com/core/app/dns"
 	"v2ray.com/core/app/router"
 	"v2ray.com/core/common"
@@ -13,7 +15,7 @@ import (
 type InboundConnectionConfig struct {
 	Port                   v2net.Port
 	ListenOn               v2net.Address
-	StreamSettings         *internet.StreamSettings
+	StreamSettings         *internet.StreamConfig
 	Protocol               string
 	Settings               []byte
 	AllowPassiveConnection bool
@@ -22,14 +24,8 @@ type InboundConnectionConfig struct {
 type OutboundConnectionConfig struct {
 	Protocol       string
 	SendThrough    v2net.Address
-	StreamSettings *internet.StreamSettings
+	StreamSettings *internet.StreamConfig
 	Settings       []byte
-}
-
-type LogConfig struct {
-	AccessLog string
-	ErrorLog  string
-	LogLevel  log.LogLevel
 }
 
 const (
@@ -50,7 +46,7 @@ type InboundDetourConfig struct {
 	ListenOn               v2net.Address
 	Tag                    string
 	Allocation             *InboundDetourAllocationConfig
-	StreamSettings         *internet.StreamSettings
+	StreamSettings         *internet.StreamConfig
 	Settings               []byte
 	AllowPassiveConnection bool
 }
@@ -58,14 +54,14 @@ type InboundDetourConfig struct {
 type OutboundDetourConfig struct {
 	Protocol       string
 	SendThrough    v2net.Address
-	StreamSettings *internet.StreamSettings
+	StreamSettings *internet.StreamConfig
 	Tag            string
 	Settings       []byte
 }
 
 type Config struct {
 	Port            v2net.Port
-	LogConfig       *LogConfig
+	LogConfig       *log.Config
 	RouterConfig    *router.Config
 	DNSConfig       *dns.Config
 	InboundConfig   *InboundConnectionConfig
@@ -75,15 +71,15 @@ type Config struct {
 	TransportConfig *transport.Config
 }
 
-type ConfigLoader func(init string) (*Config, error)
+type ConfigLoader func(input io.Reader) (*Config, error)
 
 var (
 	configLoader ConfigLoader
 )
 
-func LoadConfig(init string) (*Config, error) {
+func LoadConfig(input io.Reader) (*Config, error) {
 	if configLoader == nil {
 		return nil, common.ErrBadConfiguration
 	}
-	return configLoader(init)
+	return configLoader(input)
 }

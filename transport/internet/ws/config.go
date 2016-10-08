@@ -1,22 +1,14 @@
 package ws
 
-type Config struct {
-	ConnectionReuse             bool
-	Path                        string
-	Pto                         string
-	Cert                        string
-	PrivKey                     string
-	DeveloperInsecureSkipVerify bool
-}
+import (
+	v2net "v2ray.com/core/common/net"
+	"v2ray.com/core/transport/internet"
 
-func (this *Config) Apply() {
-	effectiveConfig = this
-}
-
-var (
-	effectiveConfig = &Config{
-		ConnectionReuse: true,
-		Path:            "",
-		Pto:             "",
-	}
+	"github.com/golang/protobuf/proto"
 )
+
+func init() {
+	internet.RegisterNetworkConfigCreator(v2net.Network_WebSocket, func() proto.Message {
+		return new(Config)
+	})
+}

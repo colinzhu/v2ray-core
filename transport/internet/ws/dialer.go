@@ -1,7 +1,6 @@
 package ws
 
 import (
-	"crypto/tls"
 	"fmt"
 	"io/ioutil"
 	"net"
@@ -10,20 +9,27 @@ import (
 	"v2ray.com/core/common/log"
 	v2net "v2ray.com/core/common/net"
 	"v2ray.com/core/transport/internet"
+	v2tls "v2ray.com/core/transport/internet/tls"
 )
 
 var (
 	globalCache = NewConnectionCache()
 )
 
-func Dial(src v2net.Address, dest v2net.Destination) (internet.Connection, error) {
+func Dial(src v2net.Address, dest v2net.Destination, options internet.DialerOptions) (internet.Connection, error) {
 	log.Info("WebSocket|Dailer: Creating connection to ", dest)
 	if src == nil {
 		src = v2net.AnyIP
 	}
+	networkSettings, err := options.Stream.GetEffectiveNetworkSettings()
+	if err != nil {
+		return nil, err
+	}
+	wsSettings := networkSettings.(*Config)
+
 	id := src.String() + "-" + dest.NetAddr()
 	var conn *wsconn
-	if dest.Network == v2net.Network_TCP && effectiveConfig.ConnectionReuse {
+	if dest.Network == v2net.Network_TCP && wsSettings.ConnectionReuse {
 		connt := globalCache.Get(id)
 		if connt != nil {
 			conn = connt.(*wsconn)
@@ -31,33 +37,54 @@ func Dial(src v2net.Address, dest v2net.Destination) (internet.Connection, error
 	}
 	if conn == nil {
 		var err error
-		conn, err = wsDial(src, dest)
+		conn, err = wsDial(src, dest, options)
 		if err != nil {
 			log.Warning("WebSocket|Dialer: Dial failed: ", err)
 			return nil, err
 		}
 	}
-	return NewConnection(id, conn, globalCache), nil
+	return NewConnection(id, conn, globalCache, wsSettings), nil
 }
 
 func init() {
 	internet.WSDialer = Dial
 }
 
-func wsDial(src v2net.Address, dest v2net.Destination) (*wsconn, error) {
+func wsDial(src v2net.Address, dest v2net.Destination, options internet.DialerOptions) (*wsconn, error) {
+	networkSettings, err := options.Stream.GetEffectiveNetworkSettings()
+	if err != nil {
+		return nil, err
+	}
+	wsSettings := networkSettings.(*Config)
+
 	commonDial := func(network, addr string) (net.Conn, error) {
 		return internet.DialToDest(src, dest)
 	}
 
-	tlsconf := &tls.Config{ServerName: dest.Address.Domain(), InsecureSkipVerify: effectiveConfig.DeveloperInsecureSkipVerify}
+	dialer := websocket.Dialer{
+		NetDial:         commonDial,
+		ReadBufferSize:  65536,
+		WriteBufferSize: 65536,
+	}
 
-	dialer := websocket.Dialer{NetDial: commonDial, ReadBufferSize: 65536, WriteBufferSize: 65536, TLSClientConfig: tlsconf}
+	protocol := "ws"
 
-	effpto := calcPto(dest)
+	if options.Stream != nil && options.Stream.SecurityType == internet.SecurityType_TLS {
+		protocol = "wss"
+		securitySettings, err := options.Stream.GetEffectiveSecuritySettings()
+		if err != nil {
+			log.Error("WebSocket: Failed to create apply TLS config: ", err)
+			return nil, err
+		}
+		dialer.TLSClientConfig = securitySettings.(*v2tls.Config).GetTLSConfig()
+		if dest.Address.Family().IsDomain() {
+			dialer.TLSClientConfig.ServerName = dest.Address.Domain()
+		}
+	}
 
 	uri := func(dst v2net.Destination, pto string, path string) string {
 		return fmt.Sprintf("%v://%v/%v", pto, dst.NetAddr(), path)
-	}(dest, effpto, effectiveConfig.Path)
+	}(dest, protocol, wsSettings.Path)
 
 	conn, resp, err := dialer.Dial(uri, nil)
 	if err != nil {
@@ -68,50 +95,12 @@ func wsDial(src v2net.Address, dest v2net.Destination) (*wsconn, error) {
 		return nil, err
 	}
 	return func() internet.Connection {
-		connv2ray := &wsconn{wsc: conn, connClosing: false}
+		connv2ray := &wsconn{
+			wsc:         conn,
+			connClosing: false,
+			config:      wsSettings,
+		}
 		connv2ray.setup()
 		return connv2ray
 	}().(*wsconn), nil
-}
-
-func calcPto(dst v2net.Destination) string {
-
-	if effectiveConfig.Pto != "" {
-		return effectiveConfig.Pto
-	}
-
-	switch dst.Port.Value() {
-	/*
-		Since the value is not given explicitly,
-		We are guessing it now.
-
-		HTTP Port:
-				80
-				8080
-				8880
-				2052
-				2082
-				2086
-				2095
-
-		HTTPS Port:
-				443
-				2053
-				2083
-				2087
-				2096
-				8443
-
-		if the port you are using is not well-known,
-		specify it to avoid this process.
-
-		We will	return "CRASH"turn "unknown" if we can't guess it, cause Dial to fail.
-	*/
-	case 80, 8080, 8880, 2052, 2082, 2086, 2095:
-		return "ws"
-	case 443, 2053, 2083, 2087, 2096, 8443:
-		return "wss"
-	default:
-		return "unknown"
-	}
 }
